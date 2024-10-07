@@ -17,3 +17,5 @@ time.sleep(60)
 
 driver.quit()
 
+# pip install webdriver-manager
+# pip install selenium 
