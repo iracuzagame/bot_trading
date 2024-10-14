@@ -2,6 +2,7 @@ import websocket
 import json
 import numpy as np
 import time
+import certifi
 
 
 def on_open(ws):
@@ -19,14 +20,41 @@ def on_message(ws, message):
         print('Error:', data['error']['message'])
 
     elif data.get("msg_type") == "authorize":
-        print("Autorización exitosa. Esperando señales...")
-        analyze_market(ws)
+        print("Autorización exitosa. Suscribiéndose a datos de mercado...")
+        subscribe_to_candles(ws)
+
+    elif data.get("msg_type") == "candles":
+        analyze_market(ws, data['candles'])
+
+    elif data.get("msg_type") == "buy":
+        # Confirmación de la compra del contrato
+        contract_id = data['buy']['contract_id']
+        print(f"Operación ejecutada. ID del contrato: {contract_id}")
+        subscribe_to_contract(ws, contract_id)
+
+    elif data.get("msg_type") == "proposal_open_contract":
+        # Detalles del contrato en tiempo real
+        print(f"Detalles del contrato: {data['proposal_open_contract']}")
+        if data['proposal_open_contract']['is_sold']:
+            print(f"El contrato ha sido vendido. Ganancia: {data['proposal_open_contract']['profit']}")
 
 
-def analyze_market(ws):
-    candles = get_fake_candles(20)
+def subscribe_to_candles(ws):
+    candles_message = {
+        "ticks_history": symbol,
+        "subscribe": 1,
+        "end": "latest",
+        "style": "candles",
+        "count": 50,  # Cantidad de velas para el análisis de SMA
+        "granularity": 60  # 1 vela por minuto
+    }
+    ws.send(json.dumps(candles_message))
+
+
+def analyze_market(ws, candles):
     print("Analizando velas...")
 
+    # Calcula el SMA-10 y SMA-50
     sma_10 = np.mean([candle['close'] for candle in candles[-10:]])
     sma_50 = np.mean([candle['close'] for candle in candles[-50:]])
 
@@ -56,7 +84,7 @@ def execute_rise_trade(ws):
         }
     }
     ws.send(json.dumps(rise_trade_message))
-    print("Operación Rise ejecutada. Esperando confirmación...")
+    print("Operación Rise enviada. Esperando confirmación...")
 
 
 def execute_fall_trade(ws):
@@ -75,11 +103,16 @@ def execute_fall_trade(ws):
         }
     }
     ws.send(json.dumps(fall_trade_message))
-    print("Operación Fall ejecutada. Esperando confirmación...")
+    print("Operación Fall enviada. Esperando confirmación...")
 
 
-def get_fake_candles(n):
-    return [{'close': 1475.2} for _ in range(n)]
+def subscribe_to_contract(ws, contract_id):
+    
+    contract_message = {
+        "proposal_open_contract": 1,
+        "contract_id": contract_id
+    }
+    ws.send(json.dumps(contract_message))
 
 
 def on_error(ws, error):
@@ -103,6 +136,4 @@ ws = websocket.WebSocketApp(
     on_message=on_message,
     on_error=on_error,
     on_close=on_close)
-
-# Iniciar WebSocket
-ws.run_forever()
+ws.run_forever(sslopt={"ca_certs": certifi.where()})
