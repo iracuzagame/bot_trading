@@ -4,8 +4,16 @@ import numpy as np
 import time
 import certifi
 
+# Variables globales
+app_id = '64652'
+token = 'ME6BuzlrA96RbUo'
+symbol = 'R_25'
+subscription_id = None  # Para almacenar el ID de la suscripción activa
+contract_id = None  # Para almacenar el ID del contrato en curso
+initial_investment = 10  # Inversión inicial para los contratos
+target_profit_percentage = 0.25  # 25% de ganancia
+contract_check_interval = 5  # Verificar cada 5 segundos el estado del contrato
 
-# Función para conectarse y autorizar
 def on_open(ws):
     print("Conexión abierta.")
     authorize_message = {
@@ -13,9 +21,8 @@ def on_open(ws):
     }
     ws.send(json.dumps(authorize_message))
 
-
-# Función para manejar los mensajes entrantes
 def on_message(ws, message):
+    global subscription_id, contract_id
     data = json.loads(message)
 
     if 'error' in data.keys():
@@ -26,94 +33,123 @@ def on_message(ws, message):
         subscribe_to_candles(ws)
 
     elif data.get("msg_type") == "candles":
+        subscription_id = data['subscription']['id']  # Guardar ID de suscripción
         analyze_market(ws, data['candles'])
 
     elif data.get("msg_type") == "buy":
-        # Confirmación de la compra del contrato
         contract_id = data['buy']['contract_id']
         print(f"Operación ejecutada. ID del contrato: {contract_id}")
         subscribe_to_contract(ws, contract_id)
 
     elif data.get("msg_type") == "proposal_open_contract":
-        # Detalles del contrato en tiempo real
         print(f"Detalles del contrato: {data['proposal_open_contract']}")
         if data['proposal_open_contract']['is_sold']:
             print(f"El contrato ha sido vendido. Ganancia: {data['proposal_open_contract']['profit']}")
+            # Reiniciar análisis tras vender el contrato
+            reanalyze_after_contract(ws)
+        else:
+            # Check and sell contract if the take profit is reached
+            check_and_finalize_contract(ws, data['proposal_open_contract'])
 
-
-# Suscripción a las velas (ticks)
 def subscribe_to_candles(ws):
+    global subscription_id
+    if subscription_id:
+        # Cancelar suscripción anterior si ya existe una
+        unsubscribe_message = {
+            "forget": subscription_id
+        }
+        ws.send(json.dumps(unsubscribe_message))
+        print(f"Cancelando suscripción previa: {subscription_id}")
+
+    # Nueva suscripción a velas
     candles_message = {
         "ticks_history": symbol,
         "subscribe": 1,
         "end": "latest",
         "style": "candles",
-        "count": 50,  # Cantidad de velas para el análisis de SMA
+        "count": 50,  # Cantidad de velas para análisis
         "granularity": 60  # 1 vela por minuto
     }
     ws.send(json.dumps(candles_message))
 
+def calculate_sma(data, window):
+    sma = np.mean(data[-window:])
+    return sma
 
-# Función para calcular el RSI
-def calculate_rsi(prices, period=14):
-    deltas = np.diff(prices)
-    gains = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
+def calculate_rsi(candles, period=4):
+    closes = [c['close'] for c in candles]
+    deltas = np.diff(closes)
+    seed = deltas[:period]
+    up = seed[seed >= 0].sum() / period
+    down = -seed[seed < 0].sum() / period
+    rs = up / down
+    rsi = np.zeros_like(closes)
+    rsi[:period] = 100. - 100. / (1. + rs)
 
-    avg_gain = np.mean(gains[:period])
-    avg_loss = np.mean(losses[:period])
+    for i in range(period, len(closes)):
+        delta = deltas[i - 1]
+        if delta > 0:
+            upval = delta
+            downval = 0.
+        else:
+            upval = 0.
+            downval = -delta
 
-    rs = avg_gain / avg_loss if avg_loss != 0 else 0
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+        up = (up * (period - 1) + upval) / period
+        down = (down * (period - 1) + downval) / period
 
+        rs = up / down
+        rsi[i] = 100. - 100. / (1. + rs)
 
-# Función para calcular MACD
-def calculate_macd(prices, short_period=12, long_period=26, signal_period=9):
-    short_ema = np.mean(prices[-short_period:])
-    long_ema = np.mean(prices[-long_period:])
-    macd_line = short_ema - long_ema
-    signal_line = np.mean([macd_line for _ in range(signal_period)])
-    return macd_line, signal_line
+    return rsi[-1]
 
+def calculate_adx(candles, period=4):
+    highs = [c['high'] for c in candles]
+    lows = [c['low'] for c in candles]
+    closes = [c['close'] for c in candles]
 
-# Función para analizar el mercado usando indicadores
+    plus_dm = [highs[i] - highs[i-1] if highs[i] - highs[i-1] > lows[i-1] - lows[i] else 0 for i in range(1, len(highs))]
+    minus_dm = [lows[i-1] - lows[i] if lows[i-1] - lows[i] > highs[i] - highs[i-1] else 0 for i in range(1, len(lows))]
+
+    trs = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(closes))]
+
+    plus_di = [100 * (sum(plus_dm[:i+1]) / sum(trs[:i+1])) for i in range(len(plus_dm))]
+    minus_di = [100 * (sum(minus_dm[:i+1]) / sum(trs[:i+1])) for i in range(len(minus_dm))]
+
+    adx = np.mean([abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) for i in range(1, len(plus_di))])
+    return plus_di[-1], minus_di[-1], adx
+
 def analyze_market(ws, candles):
-    print("Analizando velas...")
+    print("Analizando mercado...")
 
-    # Verifica si tienes suficientes velas para el análisis (al menos 50 para SMA-20 y 14 para RSI)
-    if len(candles) < 50:
-        print("No hay suficientes velas para realizar el análisis.")
-        return
+    # Calcular indicadores RSI, ADX y SMA-12
+    rsi = calculate_rsi(candles)
+    sma_12 = calculate_sma([candle['close'] for candle in candles], 12)
+    plus_di, minus_di, adx = calculate_adx(candles)
 
-    closes = [candle['close'] for candle in candles]
+    last_close = candles[-1]['close']
+    last_open = candles[-1]['open']
 
-    # Calcular SMA-20 y EMA-5
-    sma_20 = np.mean(closes[-20:]) if len(closes) >= 20 else np.nan
-    ema_5 = np.mean(closes[-5:]) if len(closes) >= 5 else np.nan
+    # Identificar si la vela es verde o roja
+    is_green_candle = last_close > last_open
+    is_red_candle = last_close < last_open
 
-    # Calcular el RSI (14-periodos)
-    rsi = calculate_rsi(closes, 14) if len(closes) >= 14 else np.nan
+    print(f"RSI: {rsi}, SMA-12: {sma_12}, DI+: {plus_di}, DI-: {minus_di}, ADX: {adx}, Último Cierre: {last_close}, Vela Verde: {is_green_candle}, Vela Roja: {is_red_candle}")
 
-    # Calcular MACD
-    macd_line, signal_line = calculate_macd(closes, 12, 26, 9) if len(closes) >= 26 else (np.nan, np.nan)
-
-    # Mostrar resultados del análisis
-    print(f"SMA-20: {sma_20}, EMA-5: {ema_5}, RSI: {rsi if not np.isnan(rsi) else 'N/A'}")
-    print(
-        f"MACD: {macd_line if not np.isnan(macd_line) else 'N/A'}, Signal: {signal_line if not np.isnan(signal_line) else 'N/A'}")
-
-    # Estrategia de compra y venta
-    if ema_5 > sma_20 and rsi < 30 and macd_line > signal_line:
+    # Estrategia basada en los indicadores
+    if rsi > 70 and last_close > sma_12 and plus_di > minus_di:
         print("Señal de compra detectada. Ejecutando operación Rise.")
         execute_rise_trade(ws)
-    elif ema_5 < sma_20 and rsi > 70 and macd_line < signal_line:
+    elif rsi < 30 and last_close < sma_12 and minus_di > plus_di:
         print("Señal de venta detectada. Ejecutando operación Fall.")
         execute_fall_trade(ws)
+    else:
+        print("No se han cumplido las condiciones para operar. Reanalizando en 30 segundos...")
+        time.sleep(30)  # Esperar 30 segundos antes de reanalizar
+        reanalyze_if_no_signal(ws)
 
-
-# Ejecuta la operación de compra (Rise)
 def execute_rise_trade(ws):
+    global contract_id
     rise_trade_message = {
         "buy": 1,
         "subscribe": 1,
@@ -131,9 +167,8 @@ def execute_rise_trade(ws):
     ws.send(json.dumps(rise_trade_message))
     print("Operación Rise enviada. Esperando confirmación...")
 
-
-# Ejecuta la operación de venta (Fall)
 def execute_fall_trade(ws):
+    global contract_id
     fall_trade_message = {
         "buy": 1,
         "subscribe": 1,
@@ -151,32 +186,44 @@ def execute_fall_trade(ws):
     ws.send(json.dumps(fall_trade_message))
     print("Operación Fall enviada. Esperando confirmación...")
 
-
-# Suscripción a los detalles del contrato
 def subscribe_to_contract(ws, contract_id):
     contract_message = {
-        "proposal_open_contract": 1,
-        "contract_id": contract_id
+        "proposal_open_contract": 1
     }
     ws.send(json.dumps(contract_message))
 
+def reanalyze_after_contract(ws):
+    print("Reiniciando análisis después de la finalización del contrato...")
+    subscribe_to_candles(ws)
 
-# Manejo de errores
+def reanalyze_if_no_signal(ws):
+    print("Reanalizando inmediatamente...")
+    subscribe_to_candles(ws)
+
+def check_and_finalize_contract(ws, contract_data):
+    global contract_id, initial_investment, target_profit_percentage
+    # Verificar si la ganancia alcanza el 25%
+    profit_percentage = contract_data['profit'] / initial_investment
+    print(f"Ganancia actual del contrato: {profit_percentage * 100}%")
+
+    if profit_percentage >= target_profit_percentage:
+        print(f"Ganancia del contrato ha alcanzado el 25% ({profit_percentage * 100}%). Vendiendo contrato...")
+        sell_contract(ws, contract_data['contract_id'])
+    else:
+        print(f"Ganancia del contrato: {profit_percentage * 100}%. Esperando...")
+
+def sell_contract(ws, contract_id):
+    sell_message = { "sell": 1, "contract_id": contract_id }
+    ws.send(json.dumps(sell_message))
+    print(f"Contrato {contract_id} vendido.")
+
 def on_error(ws, error):
     print("Error en WebSocket:", error)
 
-
-# Manejo del cierre de la conexión
 def on_close(ws, close_status_code, close_msg):
     print("Conexión cerrada. Intentando reconectar...")
-    time.sleep(10)  # Aumentar tiempo de espera antes de intentar reconectar
+    time.sleep(10)
     ws.run_forever()
-
-
-# Variables globales
-app_id = '64652'
-token = 'ME6BuzlrA96RbUo'
-symbol = 'R_100'
 
 ws = websocket.WebSocketApp(
     "wss://ws.binaryws.com/websockets/v3?app_id=" + app_id,
@@ -184,4 +231,5 @@ ws = websocket.WebSocketApp(
     on_message=on_message,
     on_error=on_error,
     on_close=on_close)
+
 ws.run_forever(sslopt={"ca_certs": certifi.where()})
