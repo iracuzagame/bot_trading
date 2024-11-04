@@ -5,8 +5,8 @@ import time
 import certifi
 
 # Variables globales
-app_id = '64652'
-token = 'ME6BuzlrA96RbUo'
+app_id = 'coloca_tu_appid'
+token = 'Coloca_tu_token_api'
 symbol = 'R_25'
 subscription_id = None  # Para almacenar el ID de la suscripción activa
 contract_id = None  # Para almacenar el ID del contrato en curso
