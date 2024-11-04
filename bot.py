@@ -6,8 +6,8 @@ import certifi
 from datetime import datetime
 
 # Variables globales
-app_id = '64652'
-token = 'ME6BuzlrA96RbUo'
+app_id = 'Tu_appid'
+token = 'Tu_token'
 symbol = 'R_100'
 amount = 1
 ticks_data = []  # Almacena los ticks recibidos
